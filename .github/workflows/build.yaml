@@ -35,180 +35,134 @@ jobs:
           echo "build_id=$build_id" >> $GITHUB_OUTPUT
           echo "push_ts=$push_ts" >> $GITHUB_OUTPUT
 
-      # --- COLD BUILD ---
-      - name: Record cold build start
-        run: echo "$(date +%s)" > /tmp/build_start
-
-      - name: Build (cold) - generate 10,000 static files
-        run: node build.js
-
-      - name: Record cold build end
-        run: echo "$(date +%s)" > /tmp/build_end
-
-      - name: Write cold build bench.txt
+      # --- COLD BUILD & DEPLOY ---
+      - name: Cold build and deploy
+        id: cold
         run: |
           source ./build
-          BUILD_START=$(cat /tmp/build_start)
-          BUILD_END=$(cat /tmp/build_end)
           
+          # Build - generate 10,000 static files
+          START_TS=$(date +%s)
+          node build.js
+          END_TS=$(date +%s)
+          
+          # Write cold bench.txt (placeholder for ready_ts)
           cat > public/bench.txt << EOF
           build_id=$build_id
           push_ts=$push_ts
-          start_ts=$BUILD_START
-          end_ts=$BUILD_END
+          start_ts=$START_TS
+          end_ts=$END_TS
           ready_ts=PLACEHOLDER
           EOF
           
-          echo "=== Cold build bench.txt (before deploy) ==="
-          cat public/bench.txt
-
-      - name: Build with Vercel (package static files)
-        run: vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
+          # Build with Vercel (package static files)
+          vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
+          
+          # Deploy
+          vercel deploy --archive=tgz --prebuilt --prod --yes --token=${{ secrets.VERCEL_TOKEN }}
+          READY_TS=$(date +%s)
+          
+          echo "start_ts=$START_TS" >> $GITHUB_OUTPUT
+          echo "end_ts=$END_TS" >> $GITHUB_OUTPUT
+          echo "ready_ts=$READY_TS" >> $GITHUB_OUTPUT
         env:
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
 
-      - name: Deploy cold build to Vercel
-        id: deploy
-        run: |
-          DEPLOY_START=$(date +%s)
-          vercel deploy --archive=tgz --prebuilt --prod --yes --token=${{ secrets.VERCEL_TOKEN }} 2>&1
-          DEPLOY_END=$(date +%s)
-          echo "deploy_end=$DEPLOY_END" >> $GITHUB_OUTPUT
-        env:
-          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
-
-      - name: Update cold build bench.txt with ready_ts
+      # --- INCREMENTAL BUILD & DEPLOY ---
+      - name: Incremental build and deploy
+        id: incr
         run: |
           source ./build
-          BUILD_START=$(cat /tmp/build_start)
-          BUILD_END=$(cat /tmp/build_end)
+          PUSH_TS=$(date +%s.%N)
           
-          cat > public/bench.txt << EOF
-          build_id=$build_id
-          push_ts=$push_ts
-          start_ts=$BUILD_START
-          end_ts=$BUILD_END
-          ready_ts=${{ steps.deploy.outputs.deploy_end }}
-          EOF
-
-      # --- INCREMENTAL BUILD ---
-      - name: Prepare incremental build
-        id: incr_prep
-        run: |
-          source ./build
-          INCR_PUSH_TS=$(date +%s.%N)
-          echo "incr_push_ts=$INCR_PUSH_TS" >> $GITHUB_OUTPUT
-          
+          # Check if files exist
           if [ -d "public/files" ]; then
             FILE_COUNT=$(ls -1 public/files/*.html 2>/dev/null | wc -l || echo "0")
-            echo "Static files found: $FILE_COUNT HTML files"
-            echo "cache_exists=true" >> $GITHUB_OUTPUT
-            echo "file_count=$FILE_COUNT" >> $GITHUB_OUTPUT
+            CACHE_EXISTS=true
           else
-            echo "WARNING: No files found!"
-            echo "cache_exists=false" >> $GITHUB_OUTPUT
-            echo "file_count=0" >> $GITHUB_OUTPUT
+            FILE_COUNT=0
+            CACHE_EXISTS=false
           fi
           
           # Modify one file to trigger incremental deploy
           echo "<!-- Incremental build marker: ${build_id}-incr-$(date +%s) -->" >> public/files/index.html
-
-      - name: Record incremental build start
-        run: echo "$(date +%s)" > /tmp/incr_build_start
-
-      # No rebuild needed for static files - just deploy the change
-      - name: Record incremental build end
-        run: echo "$(date +%s)" > /tmp/incr_build_end
-
-      - name: Write both bench files
-        run: |
-          source ./build
-          BUILD_START=$(cat /tmp/build_start)
-          BUILD_END=$(cat /tmp/build_end)
-          INCR_BUILD_START=$(cat /tmp/incr_build_start)
-          INCR_BUILD_END=$(cat /tmp/incr_build_end)
           
+          # Record timestamps (no rebuild needed for static files - just deploy the change)
+          START_TS=$(date +%s)
+          END_TS=$(date +%s)
+          
+          # Write cold bench.txt (final)
           cat > public/bench.txt << EOF
           build_id=$build_id
-          push_ts=$push_ts
-          start_ts=$BUILD_START
-          end_ts=$BUILD_END
-          ready_ts=${{ steps.deploy.outputs.deploy_end }}
+          push_ts=${{ steps.build_info.outputs.push_ts }}
+          start_ts=${{ steps.cold.outputs.start_ts }}
+          end_ts=${{ steps.cold.outputs.end_ts }}
+          ready_ts=${{ steps.cold.outputs.ready_ts }}
           EOF
           
+          # Write incremental bench (placeholder)
           cat > public/bench-incremental.txt << EOF
           build_id=$build_id
-          push_ts=${{ steps.incr_prep.outputs.incr_push_ts }}
-          start_ts=$INCR_BUILD_START
-          end_ts=$INCR_BUILD_END
+          push_ts=$PUSH_TS
+          start_ts=$START_TS
+          end_ts=$END_TS
           ready_ts=PLACEHOLDER
-          cache_exists=${{ steps.incr_prep.outputs.cache_exists }}
-          file_count=${{ steps.incr_prep.outputs.file_count }}
+          cache_exists=$CACHE_EXISTS
+          file_count=$FILE_COUNT
           EOF
           
-          echo "=== bench.txt ==="
-          cat public/bench.txt
-          echo "=== bench-incremental.txt ==="
-          cat public/bench-incremental.txt
-
-      - name: Build with Vercel (package for incremental deploy)
-        run: vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
-        env:
-          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
-
-      - name: Deploy incremental build to Vercel
-        id: deploy_incr
-        run: |
-          DEPLOY_START=$(date +%s)
+          # Build with Vercel (package for incremental deploy)
+          vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
+          
+          # Deploy to get ready_ts
           vercel deploy --archive=tgz --prebuilt --prod --yes --token=${{ secrets.VERCEL_TOKEN }}
-          DEPLOY_END=$(date +%s)
-          echo "deploy_end=$DEPLOY_END" >> $GITHUB_OUTPUT
+          READY_TS=$(date +%s)
+          
+          echo "push_ts=$PUSH_TS" >> $GITHUB_OUTPUT
+          echo "start_ts=$START_TS" >> $GITHUB_OUTPUT
+          echo "end_ts=$END_TS" >> $GITHUB_OUTPUT
+          echo "ready_ts=$READY_TS" >> $GITHUB_OUTPUT
+          echo "cache_exists=$CACHE_EXISTS" >> $GITHUB_OUTPUT
+          echo "file_count=$FILE_COUNT" >> $GITHUB_OUTPUT
         env:
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
 
-      - name: Update bench-incremental.txt with final ready_ts
+      # --- FINAL DEPLOY WITH CORRECT TIMESTAMPS ---
+      - name: Final deploy
         run: |
           source ./build
-          BUILD_START=$(cat /tmp/build_start)
-          BUILD_END=$(cat /tmp/build_end)
-          INCR_BUILD_START=$(cat /tmp/incr_build_start)
-          INCR_BUILD_END=$(cat /tmp/incr_build_end)
           
+          # Cold bench.txt (unchanged)
           cat > public/bench.txt << EOF
           build_id=$build_id
-          push_ts=$push_ts
-          start_ts=$BUILD_START
-          end_ts=$BUILD_END
-          ready_ts=${{ steps.deploy.outputs.deploy_end }}
+          push_ts=${{ steps.build_info.outputs.push_ts }}
+          start_ts=${{ steps.cold.outputs.start_ts }}
+          end_ts=${{ steps.cold.outputs.end_ts }}
+          ready_ts=${{ steps.cold.outputs.ready_ts }}
           EOF
           
+          # Incremental bench with final ready_ts
           cat > public/bench-incremental.txt << EOF
           build_id=$build_id
-          push_ts=${{ steps.incr_prep.outputs.incr_push_ts }}
-          start_ts=$INCR_BUILD_START
-          end_ts=$INCR_BUILD_END
-          ready_ts=${{ steps.deploy_incr.outputs.deploy_end }}
-          cache_exists=${{ steps.incr_prep.outputs.cache_exists }}
-          file_count=${{ steps.incr_prep.outputs.file_count }}
+          push_ts=${{ steps.incr.outputs.push_ts }}
+          start_ts=${{ steps.incr.outputs.start_ts }}
+          end_ts=${{ steps.incr.outputs.end_ts }}
+          ready_ts=${{ steps.incr.outputs.ready_ts }}
+          cache_exists=${{ steps.incr.outputs.cache_exists }}
+          file_count=${{ steps.incr.outputs.file_count }}
           EOF
           
           echo "=== Final bench.txt ==="
           cat public/bench.txt
           echo "=== Final bench-incremental.txt ==="
           cat public/bench-incremental.txt
-
-      - name: Build with Vercel (final package)
-        run: vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
-        env:
-          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
-
-      - name: Final deploy with updated bench files
-        run: vercel deploy --archive=tgz --prebuilt --prod --yes --token=${{ secrets.VERCEL_TOKEN }}
+          
+          # Build with Vercel (final package)
+          vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
+          
+          vercel deploy --archive=tgz --prebuilt --prod --yes --token=${{ secrets.VERCEL_TOKEN }}
         env:
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
